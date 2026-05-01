@@ -2,6 +2,7 @@ import csv
 import os
 import re
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -86,9 +87,15 @@ def _row_failure_default(issue: str, subject: str, company: str, error_msg: str)
     }
 
 
-def _process_ticket(issue: str, subject: str, company: str, index, chunks) -> dict:
-    risk = assess_risk(issue, subject, company)
+def _process_ticket(
+    issue_raw: str, subject_raw: str,
+    issue: str, subject: str,
+    company: str, index, chunks,
+) -> dict:
+    # Run risk assessment on RAW text so Stripe keys etc. are visible
+    risk = assess_risk(issue_raw, subject_raw, company)
 
+    # Use redacted text for retrieval & LLM prompt
     query = (issue + " " + subject).strip()
     domain = company if company in ("HackerRank", "Claude", "Visa") else None
     top_chunks = retrieve(query, index, chunks, domain=domain, top_k=6)
@@ -185,7 +192,7 @@ def main() -> int:
             company = _normalize_company(company_raw)
 
             try:
-                result = _process_ticket(issue, subject, company, index, chunks)
+                result = _process_ticket(issue_raw, subject_raw, issue, subject, company, index, chunks)
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
                 console.print(f"[yellow]Row error — escalating:[/yellow] {err}")
