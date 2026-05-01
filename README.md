@@ -114,6 +114,12 @@ python3 code/main.py
 # Reads:  support_tickets/support_tickets.csv
 # Writes: support_tickets/output.csv
 # Also renders a colour-coded table in the terminal
+
+python3 code/main.py --dry-run   # inspect retrieval without LLM calls
+# Loads corpus and index, runs risk gate and retriever for every ticket,
+# prints risk flags + top-3 chunks per ticket, then summarises how many
+# would be escalated by the risk gate vs passed to the LLM. No API key
+# required. Does not write output.csv.
 ```
 
 ---

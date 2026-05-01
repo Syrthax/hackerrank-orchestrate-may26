@@ -1,3 +1,4 @@
+import argparse
 import csv
 import os
 import re
@@ -87,10 +88,42 @@ def _row_failure_default(issue: str, subject: str, company: str, error_msg: str)
     }
 
 
+def _dry_run_ticket(
+    issue: str, subject: str, company: str,
+    risk: dict, top_chunks: list[dict],
+) -> dict:
+    auto_escalate = risk.get("should_escalate", False)
+    flags = ", ".join(risk.get("risk_flags") or []) or "none"
+    rtype_hint = risk.get("request_type_hint", "product_issue")
+
+    console.print(f"\n[bold cyan]{'─' * 60}[/bold cyan]")
+    issue_preview = issue[:80] + "..." if len(issue) > 80 else issue
+    console.print(f"[bold]Issue:[/bold] {issue_preview}")
+    console.print(f"[bold]Company:[/bold] {company}  |  [bold]request_type_hint:[/bold] {rtype_hint}")
+    console.print(f"[bold]Risk flags:[/bold] {flags}")
+    if auto_escalate:
+        console.print("[bold red]→ WOULD BE AUTO-ESCALATED (risk gate)[/bold red]")
+    else:
+        console.print("[bold green]→ WOULD REACH LLM[/bold green]")
+        console.print("[bold]Top-3 retrieved chunks:[/bold]")
+        for i, chunk in enumerate(top_chunks[:3], 1):
+            title = chunk.get("title") or chunk.get("subdir") or "untitled"
+            preview = chunk["text"][:100].replace("\n", " ")
+            score = chunk.get("score", 0.0)
+            console.print(
+                f"  [{i}] [dim]{chunk['domain']}/{chunk['subdir']}[/dim] "
+                f"[italic]{title}[/italic] (score={score:.3f})\n"
+                f"      {preview}…"
+            )
+
+    return {"status": "dry_run", "_auto_escalate": auto_escalate}
+
+
 def _process_ticket(
     issue_raw: str, subject_raw: str,
     issue: str, subject: str,
     company: str, index, chunks,
+    dry_run: bool = False,
 ) -> dict:
     # Run risk assessment on RAW text so Stripe keys etc. are visible
     risk = assess_risk(issue_raw, subject_raw, company)
@@ -99,6 +132,9 @@ def _process_ticket(
     query = (issue + " " + subject).strip()
     domain = company if company in ("HackerRank", "Claude", "Visa") else None
     top_chunks = retrieve(query, index, chunks, domain=domain, top_k=6)
+
+    if dry_run:
+        return _dry_run_ticket(issue, subject, company, risk, top_chunks)
 
     return triage(issue, subject, company, risk, top_chunks)
 
@@ -148,7 +184,16 @@ def _render_table(rows: list[dict]) -> None:
 
 
 def main() -> int:
-    if not os.environ.get("FEATHERLESS_API_KEY"):
+    parser = argparse.ArgumentParser(description="Support triage agent")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect retrieval and risk gate without making LLM calls or writing output.csv",
+    )
+    args = parser.parse_args()
+    dry_run: bool = args.dry_run
+
+    if not dry_run and not os.environ.get("FEATHERLESS_API_KEY"):
         console.print(
             "[bold red]ERROR:[/bold red] FEATHERLESS_API_KEY environment variable is not set.\n"
             "Set it in your shell or in a .env file at the repo root.\n"
@@ -159,6 +204,9 @@ def main() -> int:
     if not TICKETS_PATH.exists():
         console.print(f"[bold red]ERROR:[/bold red] tickets file not found: {TICKETS_PATH}")
         return 1
+
+    if dry_run:
+        console.print("[bold yellow]DRY RUN MODE — no LLM calls, no output.csv written[/bold yellow]")
 
     console.print(f"[bold]Loading corpus from[/bold] {DATA_DIR}")
     chunks = load_corpus(str(DATA_DIR))
@@ -180,7 +228,10 @@ def main() -> int:
     ]
 
     with Progress(*progress_columns, console=console) as progress:
-        task_id = progress.add_task("Triaging tickets", total=len(df))
+        task_id = progress.add_task(
+            "Dry run — inspecting tickets" if dry_run else "Triaging tickets",
+            total=len(df),
+        )
 
         for _, row in df.iterrows():
             issue_raw = _read_str(row, "Issue")
@@ -192,7 +243,10 @@ def main() -> int:
             company = _normalize_company(company_raw)
 
             try:
-                result = _process_ticket(issue_raw, subject_raw, issue, subject, company, index, chunks)
+                result = _process_ticket(
+                    issue_raw, subject_raw, issue, subject, company, index, chunks,
+                    dry_run=dry_run,
+                )
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
                 console.print(f"[yellow]Row error — escalating:[/yellow] {err}")
@@ -203,19 +257,30 @@ def main() -> int:
                 "issue": issue,
                 "subject": subject,
                 "company": company,
-                "response": result["response"],
-                "product_area": result["product_area"],
+                "response": result.get("response", ""),
+                "product_area": result.get("product_area", ""),
                 "status": result["status"],
-                "request_type": result["request_type"],
-                "justification": result["justification"],
+                "request_type": result.get("request_type", ""),
+                "justification": result.get("justification", ""),
+                "_auto_escalate": result.get("_auto_escalate", False),
             })
 
             progress.advance(task_id)
 
-    _write_output(output_rows)
-    console.print()
-    _render_table(output_rows)
-    console.print(f"\n[bold]Output written to[/bold] {OUTPUT_PATH.relative_to(REPO_ROOT)}")
+    if dry_run:
+        n_gate = sum(1 for r in output_rows if r.get("_auto_escalate"))
+        n_llm = len(output_rows) - n_gate
+        console.print(f"\n[bold cyan]{'─' * 60}[/bold cyan]")
+        console.print(
+            f"[bold]Dry run complete.[/bold] "
+            f"[red]{n_gate} would be escalated by risk gate[/red], "
+            f"[green]{n_llm} would reach LLM[/green]."
+        )
+    else:
+        _write_output(output_rows)
+        console.print()
+        _render_table(output_rows)
+        console.print(f"\n[bold]Output written to[/bold] {OUTPUT_PATH.relative_to(REPO_ROOT)}")
     return 0
 
 
